@@ -1,0 +1,163 @@
+name: CI
+
+# HELLOHQ FORK — upstream (deansyd/icloud_storage) ships no CI at all, so the
+# package's tests had never run automatically. This exists to catch two classes
+# of regression before HelloHQ consumes a new pin:
+#
+#   1. Dart regressions      -> the `dart` job (analyze, format, test, coverage)
+#   2. Native build breakage -> the `swift` job
+#
+# (2) is the one that matters most for this fork: the SwiftPM support added on
+# the hellohq/spm-support branch is native code with no Dart-visible surface, so
+# every test in (1) can pass green while the plugin fails to compile. That
+# happened once already -- a renamed plugin class left a stale reference and
+# broke the consuming app while all 23 Dart tests still passed.
+
+on:
+  push:
+    branches: [main, "hellohq/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with the threshold documented in README.md.
+  MIN_LINE_COVERAGE: 90
+
+jobs:
+  dart:
+    name: Analyze, test, coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: .fvmrc
+          channel: stable
+
+      - run: flutter --version
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check formatting
+        # `--set-exit-if-changed` is what makes this a gate; without it the
+        # command reports "N changed" and still exits 0.
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        run: flutter analyze --no-pub
+
+      - name: Test with coverage
+        run: flutter test --coverage --no-pub
+
+      - name: Gate, line coverage must not regress
+        run: |
+          set -euo pipefail
+          test -f coverage/lcov.info || { echo "::error::no coverage/lcov.info produced"; exit 1; }
+
+          awk -v min="$MIN_LINE_COVERAGE" '
+            /^SF:/           { file = substr($0, 4); hit = 0; found = 0 }
+            /^DA:/           { split(substr($0, 4), a, ","); found++; if (a[2] + 0 > 0) hit++ }
+            /^end_of_record/ {
+                                total_found += found; total_hit += hit
+                                printf "  %6.1f%%  %3d/%-3d  %s\n", (found ? hit * 100 / found : 0), hit, found, file
+                             }
+            END              {
+                                if (total_found == 0) { print "::error::lcov.info recorded no lines"; exit 1 }
+                                pct = total_hit * 100 / total_found
+                                printf "\nTOTAL %.1f%% (%d/%d lines), floor %d%%\n", pct, total_hit, total_found, min
+                                if (pct + 0 < min + 0) {
+                                  printf "::error::line coverage %.1f%% is below the %d%% floor\n", pct, min
+                                  exit 1
+                                }
+                             }
+          ' coverage/lcov.info
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcov
+          path: coverage/lcov.info
+          if-no-files-found: warn
+
+  swift:
+    name: Compile SwiftPM targets (${{ matrix.platform }})
+    runs-on: macos-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ios, macos]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: .fvmrc
+          channel: stable
+
+      - run: flutter --version
+
+      # The plugin's Package.swift declares a path dependency on
+      # ../FlutterFramework, which only exists inside a Flutter app's ephemeral
+      # SPM workspace. So `swift build` cannot compile these targets standalone
+      # -- the example app is the only way to typecheck them, and it is also
+      # what a consumer's build actually does.
+      - name: Enable Swift Package Manager
+        run: flutter config --enable-swift-package-manager
+
+      - name: Install example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      # iOS: a simulator build needs no provisioning, so `flutter build` is
+      # enough. macOS: the example carries iCloud entitlements, which make
+      # `flutter build macos` demand a provisioning profile no CI runner has
+      # ("Runner requires a provisioning profile with the iCloud feature").
+      # We only need to COMPILE the plugin, not sign or run it, so drive
+      # xcodebuild directly with signing off. --config-only first, to generate
+      # the ephemeral SwiftPM workspace xcodebuild then consumes.
+      - name: Compile the plugin (${{ matrix.platform }})
+        working-directory: example
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" = "ios" ]; then
+            flutter build ios --debug --simulator --no-codesign
+          else
+            flutter build macos --config-only
+            xcodebuild \
+              -workspace macos/Runner.xcworkspace \
+              -scheme Runner \
+              -configuration Debug \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              ENTITLEMENTS_REQUIRED=NO \
+              build
+          fi
+
+      - name: Gate, the plugin must have resolved through SwiftPM
+        working-directory: example
+        run: |
+          set -euo pipefail
+          # A silent fallback to CocoaPods would let a broken Package.swift pass
+          # this job, so assert SwiftPM actually took ownership of the plugin.
+          manifest="${{ matrix.platform }}/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::no generated SwiftPM manifest at $manifest -- the build did not use SwiftPM"
+            exit 1
+          fi
+          if ! grep -q 'package: "icloud_storage"' "$manifest"; then
+            echo "::error::icloud_storage is absent from the generated SwiftPM manifest"
+            cat "$manifest"
+            exit 1
+          fi
+          echo "icloud_storage resolved through SwiftPM for ${{ matrix.platform }}."
