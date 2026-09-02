@@ -176,27 +176,96 @@ void main() {
       });
     });
 
-    test('delete', () async {
-      await ICloudStorage.delete(
-          containerId: containerId, relativePath: 'file');
-      expect(fakePlatform.calls.last, 'delete');
+    group('delete tests:', () {
+      test('delete', () async {
+        await ICloudStorage.delete(
+            containerId: containerId, relativePath: 'file');
+        expect(fakePlatform.calls.last, 'delete');
+      });
+
+      test('delete with invalid relativePath', () async {
+        expect(
+          () async => await ICloudStorage.delete(
+              containerId: containerId, relativePath: 'dir//file'),
+          throwsA(isA<InvalidArgumentException>()),
+        );
+      });
     });
 
-    test('move', () async {
-      await ICloudStorage.move(
+    group('move tests:', () {
+      test('move', () async {
+        await ICloudStorage.move(
+            containerId: containerId,
+            fromRelativePath: 'from',
+            toRelativePath: 'to');
+        expect(fakePlatform.calls.last, 'move');
+      });
+
+      test('move with invalid fromRelativePath', () async {
+        expect(
+          () async => await ICloudStorage.move(
+              containerId: containerId,
+              fromRelativePath: '.hidden',
+              toRelativePath: 'to'),
+          throwsA(isA<InvalidArgumentException>()),
+        );
+      });
+
+      test('move with invalid toRelativePath', () async {
+        expect(
+          () async => await ICloudStorage.move(
+              containerId: containerId,
+              fromRelativePath: 'from',
+              toRelativePath: 'dir:file'),
+          throwsA(isA<InvalidArgumentException>()),
+        );
+      });
+    });
+
+    group('rename tests:', () {
+      test('rename', () async {
+        await ICloudStorage.rename(
           containerId: containerId,
-          fromRelativePath: 'from',
-          toRelativePath: 'to');
-      expect(fakePlatform.calls.last, 'move');
+          relativePath: 'dir/file1',
+          newName: 'file2',
+        );
+        expect(fakePlatform.moveToRelativePath, 'dir/file2');
+      });
+
+      test('rename with invalid relativePath', () async {
+        expect(
+          () async => await ICloudStorage.rename(
+              containerId: containerId,
+              relativePath: 'dir//file1',
+              newName: 'file2'),
+          throwsA(isA<InvalidArgumentException>()),
+        );
+      });
+
+      test('rename with a newName that is a path, not a name', () async {
+        expect(
+          () async => await ICloudStorage.rename(
+              containerId: containerId,
+              relativePath: 'dir/file1',
+              newName: 'sub/file2'),
+          throwsA(isA<InvalidArgumentException>()),
+        );
+      });
+
+      test('rename with an empty newName', () async {
+        expect(
+          () async => await ICloudStorage.rename(
+              containerId: containerId, relativePath: 'dir/file1', newName: ''),
+          throwsA(isA<InvalidArgumentException>()),
+        );
+      });
     });
 
-    test('rename', () async {
-      await ICloudStorage.rename(
-        containerId: containerId,
-        relativePath: 'dir/file1',
-        newName: 'file2',
+    test('InvalidArgumentException names the offending argument', () {
+      expect(
+        InvalidArgumentException('invalid newName').toString(),
+        'InvalidArgumentException: invalid newName',
       );
-      expect(fakePlatform.moveToRelativePath, 'dir/file2');
     });
   });
 }

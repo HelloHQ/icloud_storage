@@ -10,9 +10,11 @@ void main() {
   const containerId = 'containerId';
 
   TestWidgetsFlutterBinding.ensureInitialized();
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   setUp(() {
-    channel.setMockMethodCallHandler((MethodCall methodCall) async {
+    messenger.setMockMethodCallHandler(channel, (MethodCall methodCall) async {
       mockMethodCall = methodCall;
       switch (methodCall.method) {
         case 'gather':
@@ -37,7 +39,7 @@ void main() {
   });
 
   tearDown(() {
-    channel.setMockMethodCallHandler(null);
+    messenger.setMockMethodCallHandler(channel, null);
   });
 
   group('gather tests:', () {
@@ -65,6 +67,73 @@ void main() {
       expect(
           (mockMethodCall.arguments['eventChannelName'] as String).isNotEmpty,
           true);
+    });
+
+    test('the update stream maps native events to ICloudFile', () async {
+      Stream<List<ICloudFile>>? updates;
+      await platform.gather(
+        containerId: containerId,
+        onUpdate: (stream) => updates = stream,
+      );
+      final eventChannelName =
+          mockMethodCall.arguments['eventChannelName'] as String;
+
+      expect(updates, isNotNull);
+      final firstEvent = updates!.first;
+
+      // The native side pushes the same map shape `gather` returns.
+      await messenger.handlePlatformMessage(
+        eventChannelName,
+        const StandardMethodCodec().encodeSuccessEnvelope([
+          {
+            'relativePath': 'streamed/file',
+            'sizeInBytes': 42,
+            'creationDate': 1.0,
+            'contentChangeDate': 1.0,
+            'isDownloading': false,
+            'downloadStatus':
+                'NSMetadataUbiquitousItemDownloadingStatusCurrent',
+            'isUploading': false,
+            'isUploaded': true,
+            'hasUnresolvedConflicts': false,
+          }
+        ]),
+        (_) {},
+      );
+
+      final files = await firstEvent;
+      expect(files, hasLength(1));
+      expect(files.single.relativePath, 'streamed/file');
+      expect(files.single.downloadStatus, DownloadStatus.current);
+    });
+
+    test('omits a file it cannot map instead of failing the whole gather',
+        () async {
+      messenger.setMockMethodCallHandler(channel,
+          (MethodCall methodCall) async {
+        mockMethodCall = methodCall;
+        if (methodCall.method != 'gather') return null;
+        return [
+          {
+            'relativePath': 'good/file',
+            'sizeInBytes': 100,
+            'creationDate': 1.0,
+            'contentChangeDate': 1.0,
+            'isDownloading': false,
+            'downloadStatus':
+                'NSMetadataUbiquitousItemDownloadingStatusNotDownloaded',
+            'isUploading': false,
+            'isUploaded': true,
+            'hasUnresolvedConflicts': false,
+          },
+          // Missing every field ICloudFile.fromMap requires.
+          <dynamic, dynamic>{'relativePath': 'unmappable/file'},
+        ];
+      });
+
+      final files = await platform.gather(containerId: containerId);
+      expect(files, hasLength(1));
+      expect(files.single.relativePath, 'good/file');
     });
   });
 

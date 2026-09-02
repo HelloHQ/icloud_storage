@@ -1,5 +1,24 @@
 # icloud_storage
 
+> **HelloHQ fork.** Forked from [deansyd/icloud_storage](https://github.com/deansyd/icloud_storage)
+> to add Swift Package Manager support, because Flutter now warns that
+> CocoaPods-only plugins "will become an error in a future version". The
+> podspecs are kept alongside the `Package.swift` manifests and point at the
+> same sources, so CocoaPods and SwiftPM both build.
+>
+> This fork also adds the CI upstream never had (`.github/workflows/ci.yml`):
+>
+> | Job | What it guards |
+> |---|---|
+> | `dart` | `dart format`, `flutter analyze`, `flutter test --coverage`, and a **90% line-coverage floor** |
+> | `swift` | Compiles the plugin for **both** iOS and macOS through the SwiftPM path |
+>
+> The `swift` job is the important one. The SPM support is native code with no
+> Dart-visible surface, so every Dart test can pass while the plugin fails to
+> compile -- which is exactly what happened once, when a renamed plugin class
+> left a stale reference behind. Do not rely on the `dart` job alone when
+> changing anything under `ios/` or `macos/`.
+
 [![Pub](https://img.shields.io/pub/v/icloud_storage.svg)](https://pub.dev/packages/icloud_storage)
 [![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://www.paypal.com/donate?hosted_button_id=BH6WBSGWN594U)
 
