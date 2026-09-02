@@ -15,7 +15,13 @@ name: CI
 
 on:
   push:
-    branches: [main, "hellohq/**"]
+    # master, not main: this is a fork of deansyd/icloud_storage and inherited
+    # upstream's default branch name. Listing only `main` here made the push
+    # trigger match nothing on the default branch — CI would have run on PRs
+    # and then gone quiet the moment anything landed, which is the failure mode
+    # where a gate looks present and enforces nothing. `main` is kept so a
+    # future rename does not silently disable it again.
+    branches: [master, main, "hellohq/**"]
   pull_request:
   workflow_dispatch:
 
