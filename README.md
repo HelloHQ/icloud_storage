@@ -97,6 +97,12 @@ await ICloudStorage.download(
 
 Note: The 'startDownload' API is to start the download process. The returned future completes without waiting for the download to complete. Use 'onProgress' to track the download progress.
 
+On iOS and macOS, download discovers the requested iCloud item before asking
+iCloud Drive to fetch its contents. Container lookup and file copying run off
+the Flutter main thread. A missing item is reported on the progress stream
+after 45 seconds. Native download errors include the `NSError` domain, code,
+and operation stage in `PlatformException.details`.
+
 ### Delete a file from iCloud
 
 ```dart

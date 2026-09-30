@@ -1,3 +1,9 @@
+## Unreleased
+
+- Discover remote iCloud documents before requesting download on iOS and macOS.
+- Keep blocking iCloud filesystem work off the Flutter main thread and report
+  structured native download errors.
+
 ## 2.2.0
 
 - Bug fix: upload and download errors were not passed from the platform code.
