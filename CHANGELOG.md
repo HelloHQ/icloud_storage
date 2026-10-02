@@ -3,6 +3,11 @@
 - Discover remote iCloud documents before requesting download on iOS and macOS.
 - Keep blocking iCloud filesystem work off the Flutter main thread and report
   structured native download errors.
+- Discover downloads by filename, then select the requested container and
+  relative path so same-named files in other folders or scopes are ignored.
+- Clean up download queries and observers on completion, error, cancellation,
+  and missing-file timeout, including concurrent downloads without progress
+  event channels.
 
 ## 2.2.0
 

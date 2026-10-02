@@ -5,8 +5,7 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
   var listStreamHandler: StreamHandler?
   var messenger: FlutterBinaryMessenger?
   var streamHandlers: [String: StreamHandler] = [:]
-  private var pendingDownloadChecks: Set<String> = []
-  private var requestedDownloads: Set<String> = []
+  private var downloadQueries: [UUID: DownloadQuery] = [:]
   let querySearchScopes = [NSMetadataQueryUbiquitousDataScope, NSMetadataQueryUbiquitousDocumentsScope];
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -211,8 +210,8 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
     }
 
     // Cancellation can arrive while iCloud is still resolving the container.
-    streamHandlers[eventChannelName]?.onCancelHandler = { [self] in
-      removeStreamHandler(eventChannelName)
+    streamHandlers[eventChannelName]?.onCancelHandler = { [weak self] in
+      self?.removeStreamHandler(eventChannelName)
     }
 
     // Resolving the ubiquity container can block on filesystem metadata.
@@ -221,7 +220,11 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
     DispatchQueue.global(qos: .utility).async { [self] in
       guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: containerId)
       else {
-        DispatchQueue.main.async { result(containerError) }
+        DispatchQueue.main.async { [self] in
+          streamHandlers[eventChannelName]?.onCancelHandler = nil
+          removeStreamHandler(eventChannelName)
+          result(containerError)
+        }
         return
       }
 
@@ -235,54 +238,44 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
         query.operationQueue = .main
         query.searchScopes = querySearchScopes
         query.predicate = NSPredicate(format: "%K == %@", NSMetadataItemFSNameKey, cloudFileURL.lastPathComponent)
+        let download = DownloadQuery(query: query, cloudFileURL: cloudFileURL)
+        downloadQueries[download.id] = download
 
         let downloadStreamHandler = streamHandlers[eventChannelName]
-        downloadStreamHandler?.onCancelHandler = { [self] in
-          pendingDownloadChecks.remove(eventChannelName)
-          requestedDownloads.remove(eventChannelName)
-          removeObservers(query)
-          query.stop()
-          removeStreamHandler(eventChannelName)
+        downloadStreamHandler?.onCancelHandler = { [weak self, weak download] in
+          guard let self = self, let download = download else { return }
+          self.finishDownload(download, eventChannelName: eventChannelName)
         }
 
         let localFileURL = URL(fileURLWithPath: localFilePath)
-        addDownloadObservers(query: query, localFileURL: localFileURL, eventChannelName: eventChannelName)
+        download.observe { [weak self] download in
+          self?.onDownloadQueryNotification(download: download, localFileURL: localFileURL, eventChannelName: eventChannelName)
+        }
 
         query.start()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [self, weak query] in
-          guard let query = query, query.results.isEmpty,
-                let streamHandler = streamHandlers[eventChannelName] else { return }
-          streamHandler.setEvent(fileNotFoundError)
-          query.stop()
-          removeStreamHandler(eventChannelName)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self, weak download] in
+          guard let self = self, let download = download,
+                download.stopIfNotFound() else { return }
+          self.streamHandlers[eventChannelName]?.setEvent(self.fileNotFoundError)
+          self.finishDownload(download, eventChannelName: eventChannelName)
         }
         result(nil)
       }
     }
   }
 
-  private func addDownloadObservers(query: NSMetadataQuery, localFileURL: URL, eventChannelName: String) {
-    NotificationCenter.default.addObserver(forName: NSNotification.Name.NSMetadataQueryDidFinishGathering, object: query, queue: query.operationQueue) { [self] (notification) in
-      onDownloadQueryNotification(query: query, localFileURL: localFileURL, eventChannelName: eventChannelName)
-    }
-
-    NotificationCenter.default.addObserver(forName: NSNotification.Name.NSMetadataQueryDidUpdate, object: query, queue: query.operationQueue) { [self] (notification) in
-      onDownloadQueryNotification(query: query, localFileURL: localFileURL, eventChannelName: eventChannelName)
-    }
+  private func finishDownload(_ download: DownloadQuery, eventChannelName: String) {
+    download.stop()
+    downloadQueries.removeValue(forKey: download.id)
+    streamHandlers[eventChannelName]?.onCancelHandler = nil
+    removeStreamHandler(eventChannelName)
   }
 
-  private func onDownloadQueryNotification(query: NSMetadataQuery, localFileURL: URL, eventChannelName: String) {
-    if query.results.count == 0 {
-      return
-    }
-
-    guard let fileItem = query.results.first as? NSMetadataItem else { return }
+  private func onDownloadQueryNotification(download: DownloadQuery, localFileURL: URL, eventChannelName: String) {
+    guard let fileItem = download.matchingItem() else { return }
     guard let fileURL = fileItem.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
-    guard !pendingDownloadChecks.contains(eventChannelName),
-          eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil else { return }
-    pendingDownloadChecks.insert(eventChannelName)
-    let needsDownloadRequest = !requestedDownloads.contains(eventChannelName)
-    requestedDownloads.insert(eventChannelName)
+    guard eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil,
+          let needsDownloadRequest = download.beginCheck() else { return }
 
     if let progress = fileItem.value(forAttribute: NSMetadataUbiquitousItemPercentDownloadedKey) as? Double {
       streamHandlers[eventChannelName]?.setEvent(progress)
@@ -314,7 +307,8 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
       let outcomeError = downloadError
       let didCopy = copied
       DispatchQueue.main.async { [self] in
-        pendingDownloadChecks.remove(eventChannelName)
+        guard download.isActive else { return }
+        download.endCheck()
         guard eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil else { return }
         let streamHandler = streamHandlers[eventChannelName]
         if let outcomeError = outcomeError {
@@ -324,9 +318,7 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
         } else {
           return
         }
-        requestedDownloads.remove(eventChannelName)
-        query.stop()
-        removeStreamHandler(eventChannelName)
+        finishDownload(download, eventChannelName: eventChannelName)
       }
     }
   }

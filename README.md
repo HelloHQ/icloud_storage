@@ -11,7 +11,7 @@
 > | Job | What it guards |
 > |---|---|
 > | `dart` | `dart format`, `flutter analyze`, `flutter test --coverage`, and a **90% line-coverage floor** |
-> | `swift` | Compiles the plugin for **both** iOS and macOS through the SwiftPM path |
+> | `swift` | Tests native download selection and cleanup, and compiles the plugin for **both** iOS and macOS through the SwiftPM path |
 >
 > The `swift` job is the important one. The SPM support is native code with no
 > Dart-visible surface, so every Dart test can pass while the plugin fails to
@@ -98,10 +98,15 @@ await ICloudStorage.download(
 Note: The 'startDownload' API is to start the download process. The returned future completes without waiting for the download to complete. Use 'onProgress' to track the download progress.
 
 On iOS and macOS, download discovers the requested iCloud item before asking
-iCloud Drive to fetch its contents. Container lookup and file copying run off
-the Flutter main thread. A missing item is reported on the progress stream
-after 45 seconds. Native download errors include the `NSError` domain, code,
+iCloud Drive to fetch its contents. Discovery searches by filename; selection
+matches the requested container and relative path. Container lookup and file
+copying run off the Flutter main thread. A missing item is reported on the
+progress stream after 45 seconds, and its query is cleaned up even without a
+progress stream. Native download errors include the `NSError` domain, code,
 and operation stage in `PlatformException.details`.
+
+Native download regression tests run on macOS with Xcode installed:
+`bash test/native/run_download_tests.sh`.
 
 ### Delete a file from iCloud
 
