@@ -118,6 +118,10 @@ jobs:
       # SPM workspace. So `swift build` cannot compile these targets standalone
       # -- the example app is the only way to typecheck them, and it is also
       # what a consumer's build actually does.
+      - name: Test native download selection and cleanup
+        if: matrix.platform == 'macos'
+        run: bash test/native/run_download_tests.sh
+
       - name: Enable Swift Package Manager
         run: flutter config --enable-swift-package-manager
 

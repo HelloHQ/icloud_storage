@@ -5,6 +5,7 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
   var listStreamHandler: StreamHandler?
   var messenger: FlutterBinaryMessenger?
   var streamHandlers: [String: StreamHandler] = [:]
+  private var downloadQueries: [UUID: DownloadQuery] = [:]
   let querySearchScopes = [NSMetadataQueryUbiquitousDataScope, NSMetadataQueryUbiquitousDocumentsScope];
 
   public static func register(with registrar: FlutterPluginRegistrar) {
@@ -207,80 +208,121 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
       result(argumentError)
       return
     }
-    
-    guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: containerId)
-    else {
-      result(containerError)
-      return
-    }
-    DebugHelper.log("containerURL: \(containerURL.path)")
-    
-    let cloudFileURL = containerURL.appendingPathComponent(cloudFileName)
-    do {
-      try FileManager.default.startDownloadingUbiquitousItem(at: cloudFileURL)
-    } catch {
-      result(nativeCodeError(error))
-    }
-    
-    let query = NSMetadataQuery.init()
-    query.operationQueue = .main
-    query.searchScopes = querySearchScopes
-    query.predicate = NSPredicate(format: "%K == %@", NSMetadataItemPathKey, cloudFileURL.path)
-    
-    let downloadStreamHandler = self.streamHandlers[eventChannelName]
-    downloadStreamHandler?.onCancelHandler = { [self] in
-      removeObservers(query)
-      query.stop()
-      removeStreamHandler(eventChannelName)
+
+    // Cancellation can arrive while iCloud is still resolving the container.
+    streamHandlers[eventChannelName]?.onCancelHandler = { [weak self] in
+      self?.removeStreamHandler(eventChannelName)
     }
 
-    let localFileURL = URL(fileURLWithPath: localFilePath)
-    addDownloadObservers(query: query, cloudFileURL: cloudFileURL, localFileURL: localFileURL, eventChannelName: eventChannelName)
-    
-    query.start()
-    result(nil)
-  }
-  
-  private func addDownloadObservers(query: NSMetadataQuery, cloudFileURL: URL, localFileURL: URL, eventChannelName: String) {
-    NotificationCenter.default.addObserver(forName: NSNotification.Name.NSMetadataQueryDidFinishGathering, object: query, queue: query.operationQueue) { [self] (notification) in
-      onDownloadQueryNotification(query: query, cloudFileURL: cloudFileURL, localFileURL: localFileURL, eventChannelName: eventChannelName)
-    }
-    
-    NotificationCenter.default.addObserver(forName: NSNotification.Name.NSMetadataQueryDidUpdate, object: query, queue: query.operationQueue) { [self] (notification) in
-      onDownloadQueryNotification(query: query, cloudFileURL: cloudFileURL, localFileURL: localFileURL, eventChannelName: eventChannelName)
-    }
-  }
-  
-  private func onDownloadQueryNotification(query: NSMetadataQuery, cloudFileURL: URL, localFileURL: URL, eventChannelName: String) {
-    if query.results.count == 0 {
-      return
-    }
-    
-    guard let fileItem = query.results.first as? NSMetadataItem else { return }
-    guard let fileURL = fileItem.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
-    guard let fileURLValues = try? fileURL.resourceValues(forKeys: [.ubiquitousItemDownloadingErrorKey, .ubiquitousItemDownloadingStatusKey]) else { return }
-    let streamHandler = self.streamHandlers[eventChannelName]
-    
-    if let error = fileURLValues.ubiquitousItemDownloadingError {
-      streamHandler?.setEvent(nativeCodeError(error))
-      return
-    }
-    
-    if let progress = fileItem.value(forAttribute: NSMetadataUbiquitousItemPercentDownloadedKey) as? Double {
-      streamHandler?.setEvent(progress)
-    }
-    
-    if fileURLValues.ubiquitousItemDownloadingStatus == URLUbiquitousItemDownloadingStatus.current {
-      do {
-        try moveCloudFile(at: cloudFileURL, to: localFileURL)
-        streamHandler?.setEvent(FlutterEndOfEventStream)
-        removeStreamHandler(eventChannelName)
-      } catch {
-        streamHandler?.setEvent(nativeCodeError(error))
+    // Resolving the ubiquity container can block on filesystem metadata.
+    // Discover the remote item with NSMetadataQuery before requesting its data:
+    // another device's file may not have a local placeholder path yet.
+    DispatchQueue.global(qos: .utility).async { [self] in
+      guard let containerURL = FileManager.default.url(forUbiquityContainerIdentifier: containerId)
+      else {
+        DispatchQueue.main.async { [self] in
+          streamHandlers[eventChannelName]?.onCancelHandler = nil
+          removeStreamHandler(eventChannelName)
+          result(containerError)
+        }
+        return
+      }
+
+      let cloudFileURL = containerURL.appendingPathComponent(cloudFileName)
+      DispatchQueue.main.async { [self] in
+        guard eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil else {
+          result(FlutterError(code: "E_CANCEL", message: "Download cancelled", details: nil))
+          return
+        }
+        let query = NSMetadataQuery()
+        query.operationQueue = .main
+        query.searchScopes = querySearchScopes
+        query.predicate = NSPredicate(format: "%K == %@", NSMetadataItemFSNameKey, cloudFileURL.lastPathComponent)
+        let download = DownloadQuery(query: query, cloudFileURL: cloudFileURL)
+        downloadQueries[download.id] = download
+
+        let downloadStreamHandler = streamHandlers[eventChannelName]
+        downloadStreamHandler?.onCancelHandler = { [weak self, weak download] in
+          guard let self = self, let download = download else { return }
+          self.finishDownload(download, eventChannelName: eventChannelName)
+        }
+
+        let localFileURL = URL(fileURLWithPath: localFilePath)
+        download.observe { [weak self] download in
+          self?.onDownloadQueryNotification(download: download, localFileURL: localFileURL, eventChannelName: eventChannelName)
+        }
+
+        query.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self, weak download] in
+          guard let self = self, let download = download,
+                download.stopIfNotFound() else { return }
+          self.streamHandlers[eventChannelName]?.setEvent(self.fileNotFoundError)
+          self.finishDownload(download, eventChannelName: eventChannelName)
+        }
+        result(nil)
       }
     }
   }
-  
+
+  private func finishDownload(_ download: DownloadQuery, eventChannelName: String) {
+    download.stop()
+    downloadQueries.removeValue(forKey: download.id)
+    streamHandlers[eventChannelName]?.onCancelHandler = nil
+    removeStreamHandler(eventChannelName)
+  }
+
+  private func onDownloadQueryNotification(download: DownloadQuery, localFileURL: URL, eventChannelName: String) {
+    guard let fileItem = download.matchingItem() else { return }
+    guard let fileURL = fileItem.value(forAttribute: NSMetadataItemURLKey) as? URL else { return }
+    guard eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil,
+          let needsDownloadRequest = download.beginCheck() else { return }
+
+    if let progress = fileItem.value(forAttribute: NSMetadataUbiquitousItemPercentDownloadedKey) as? Double {
+      streamHandlers[eventChannelName]?.setEvent(progress)
+    }
+
+    // Resource values and the final copy may also block while iCloud hydrates
+    // the file. Report their outcome on the main thread with the event stream.
+    DispatchQueue.global(qos: .utility).async { [self] in
+      var downloadError: FlutterError?
+      var copied = false
+      var stage = "request_download"
+      do {
+        if needsDownloadRequest {
+          try FileManager.default.startDownloadingUbiquitousItem(at: fileURL)
+        }
+        stage = "read_download_status"
+        let values = try fileURL.resourceValues(forKeys: [.ubiquitousItemDownloadingErrorKey, .ubiquitousItemDownloadingStatusKey])
+        if let error = values.ubiquitousItemDownloadingError {
+          downloadError = nativeCodeError(error, stage: stage)
+        } else if values.ubiquitousItemDownloadingStatus == URLUbiquitousItemDownloadingStatus.current {
+          stage = "copy_downloaded_file"
+          try moveCloudFile(at: fileURL, to: localFileURL)
+          copied = true
+        }
+      } catch {
+        downloadError = nativeCodeError(error, stage: stage)
+      }
+
+      let outcomeError = downloadError
+      let didCopy = copied
+      DispatchQueue.main.async { [self] in
+        guard download.isActive else { return }
+        download.endCheck()
+        guard eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil else { return }
+        let streamHandler = streamHandlers[eventChannelName]
+        if let outcomeError = outcomeError {
+          streamHandler?.setEvent(outcomeError)
+        } else if didCopy {
+          streamHandler?.setEvent(FlutterEndOfEventStream)
+        } else {
+          return
+        }
+        finishDownload(download, eventChannelName: eventChannelName)
+      }
+    }
+  }
+
   private func moveCloudFile(at: URL, to: URL) throws {
     do {
       if FileManager.default.fileExists(atPath: to.path) {
@@ -392,8 +434,13 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
   let containerError = FlutterError(code: "E_CTR", message: "Invalid containerId, or user is not signed in, or user disabled iCloud permission", details: nil)
   let fileNotFoundError = FlutterError(code: "E_FNF", message: "The file does not exist", details: nil)
   
-  private func nativeCodeError(_ error: Error) -> FlutterError {
-    return FlutterError(code: "E_NAT", message: "Native Code Error", details: "\(error)")
+  private func nativeCodeError(_ error: Error, stage: String? = nil) -> FlutterError {
+    // Formatting Error/NSError can synchronously read URL resource metadata.
+    // That operation stalled the simulator's Flutter main thread on download.
+    let nativeError = error as NSError
+    var details: [String: Any] = ["domain": nativeError.domain, "code": nativeError.code]
+    if let stage = stage { details["stage"] = stage }
+    return FlutterError(code: "E_NAT", message: "Native Code Error", details: details)
   }
 }
 
