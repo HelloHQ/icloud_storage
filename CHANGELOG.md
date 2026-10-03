@@ -8,6 +8,10 @@
 - Clean up download queries and observers on completion, error, cancellation,
   and missing-file timeout, including concurrent downloads without progress
   event channels.
+- Treat `/private/var/...` and `/var/...` spellings of a path as the same file
+  when selecting the download, without touching the file system.
+- Stop an abandoned download query on the main queue even when its last
+  reference is released on a background queue.
 
 ## 2.2.0
 

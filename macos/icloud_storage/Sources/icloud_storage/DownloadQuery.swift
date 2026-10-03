@@ -14,7 +14,7 @@ final class DownloadQuery {
 
   init(query: NSMetadataQuery, cloudFileURL: URL, notificationCenter: NotificationCenter = .default) {
     self.query = query
-    self.cloudFileURL = cloudFileURL.standardizedFileURL
+    self.cloudFileURL = URL(fileURLWithPath: DownloadQuery.canonicalPath(cloudFileURL))
     self.notificationCenter = notificationCenter
   }
 
@@ -24,8 +24,21 @@ final class DownloadQuery {
     // and relative path. A URL match does not require a local placeholder.
     return query.results.compactMap { $0 as? NSMetadataItem }.first { item in
       guard let url = item.value(forAttribute: NSMetadataItemURLKey) as? URL else { return false }
-      return url.standardizedFileURL.path == cloudFileURL.path
+      return DownloadQuery.canonicalPath(url) == cloudFileURL.path
     }
+  }
+
+  // The container URL and the metadata item URL can spell the same file
+  // differently: /var, /tmp and /etc are symlinks to /private/..., and the
+  // two APIs do not agree on which form they return (iOS containers live under
+  // /private/var/mobile). Normalize lexically so no file system call runs on
+  // the main thread and files without a local placeholder still compare.
+  static func canonicalPath(_ url: URL) -> String {
+    let path = url.standardizedFileURL.path
+    for alias in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(alias) {
+      return String(path.dropFirst("/private".count))
+    }
+    return path
   }
 
   func observe(_ onUpdate: @escaping (DownloadQuery) -> Void) {
@@ -71,6 +84,19 @@ final class DownloadQuery {
   }
 
   deinit {
-    stop()
+    // The last reference can be dropped on a background queue (the status
+    // check runs off the main thread). Observer removal is thread-safe, but
+    // NSMetadataQuery belongs to the main queue, so stop it there.
+    guard isActive else { return }
+    isActive = false
+    for token in observerTokens {
+      notificationCenter.removeObserver(token)
+    }
+    let query = self.query
+    if Thread.isMainThread {
+      query.stop()
+    } else {
+      DispatchQueue.main.async { query.stop() }
+    }
   }
 }

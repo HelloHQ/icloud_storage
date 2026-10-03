@@ -28,7 +28,51 @@ private final class MetadataQuery: NSMetadataQuery {
 
 private final class ObserverCapture {}
 
+private final class StopThreadQuery: NSMetadataQuery {
+  var onStop: ((Bool) -> Void)?
+
+  override var results: [Any] { [] }
+
+  override func stop() {
+    onStop?(Thread.isMainThread)
+  }
+}
+
 final class DownloadQueryTests: XCTestCase {
+  func testMatchesPrivateVarAndVarSpellingsOfTheSameFile() {
+    let container = "/var/mobile/Library/Mobile Documents/iCloud~com~hellohq~hellohq/Documents/backup.zip"
+    for (requested, reported) in [(container, "/private" + container), ("/private" + container, container)] {
+      let query = MetadataQuery()
+      let wanted = MetadataItem(path: reported)
+      query.items = [MetadataItem(path: "/private/var/mobile/Library/Mobile Documents/iCloud~com~hellohq~hellohq/old/backup.zip"), wanted]
+      let download = DownloadQuery(query: query, cloudFileURL: URL(fileURLWithPath: requested), notificationCenter: NotificationCenter())
+      XCTAssertTrue(download.matchingItem() === wanted, "\(requested) vs \(reported)")
+    }
+  }
+
+  func testPrivatePrefixIsOnlyStrippedForSystemAliases() {
+    XCTAssertEqual(DownloadQuery.canonicalPath(URL(fileURLWithPath: "/private/var/a/b.zip")), "/var/a/b.zip")
+    XCTAssertEqual(DownloadQuery.canonicalPath(URL(fileURLWithPath: "/private/projects/b.zip")), "/private/projects/b.zip")
+    XCTAssertEqual(DownloadQuery.canonicalPath(URL(fileURLWithPath: "/var/a/../c/b.zip")), "/var/c/b.zip")
+  }
+
+  func testReleasingOnBackgroundQueueStopsQueryOnMainThread() {
+    let query = StopThreadQuery()
+    let stopped = expectation(description: "query stopped")
+    query.onStop = { isMain in
+      XCTAssertTrue(isMain)
+      stopped.fulfill()
+    }
+    var download: DownloadQuery? = DownloadQuery(query: query, cloudFileURL: URL(fileURLWithPath: wantedPath), notificationCenter: NotificationCenter())
+    download?.observe { _ in }
+    let released = expectation(description: "released on background")
+    DispatchQueue.global().async {
+      download = nil
+      released.fulfill()
+    }
+    wait(for: [released, stopped], timeout: 5)
+  }
+
   private let wantedPath = "/icloud-storage-tests/container/Documents/backup.zip"
 
   private func makeDownload(_ query: MetadataQuery, center: NotificationCenter = NotificationCenter()) -> DownloadQuery {
