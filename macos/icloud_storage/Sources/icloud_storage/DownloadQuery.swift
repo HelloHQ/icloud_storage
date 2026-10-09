@@ -6,7 +6,7 @@ final class DownloadQuery {
   let id = UUID()
   let query: NSMetadataQuery
   private(set) var isActive = true
-  private let cloudFileURL: URL
+  private let cloudFilePath: String
   private let notificationCenter: NotificationCenter
   private var observerTokens: [NSObjectProtocol] = []
   private var pendingCheck = false
@@ -14,7 +14,9 @@ final class DownloadQuery {
 
   init(query: NSMetadataQuery, cloudFileURL: URL, notificationCenter: NotificationCenter = .default) {
     self.query = query
-    self.cloudFileURL = URL(fileURLWithPath: DownloadQuery.canonicalPath(cloudFileURL))
+    // Inferring whether an iCloud URL is a directory invokes lstat and can
+    // block the main queue. Matching needs only a lexical path, never a new URL.
+    self.cloudFilePath = DownloadQuery.canonicalPath(cloudFileURL)
     self.notificationCenter = notificationCenter
   }
 
@@ -24,7 +26,7 @@ final class DownloadQuery {
     // and relative path. A URL match does not require a local placeholder.
     return query.results.compactMap { $0 as? NSMetadataItem }.first { item in
       guard let url = item.value(forAttribute: NSMetadataItemURLKey) as? URL else { return false }
-      return DownloadQuery.canonicalPath(url) == cloudFileURL.path
+      return DownloadQuery.canonicalPath(url) == cloudFilePath
     }
   }
 
@@ -34,7 +36,16 @@ final class DownloadQuery {
   // /private/var/mobile). Normalize lexically so no file system call runs on
   // the main thread and files without a local placeholder still compare.
   static func canonicalPath(_ url: URL) -> String {
-    let path = url.standardizedFileURL.path
+    var components: [Substring] = []
+    for component in url.path.split(separator: "/") {
+      switch component {
+      case ".": continue
+      case "..":
+        if !components.isEmpty { components.removeLast() }
+      default: components.append(component)
+      }
+    }
+    let path = "/" + components.joined(separator: "/")
     for alias in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(alias) {
       return String(path.dropFirst("/private".count))
     }

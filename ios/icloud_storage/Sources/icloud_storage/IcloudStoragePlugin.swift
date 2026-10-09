@@ -230,6 +230,7 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
       }
 
       let cloudFileURL = containerURL.appendingPathComponent(cloudFileName)
+      let localFileURL = URL(fileURLWithPath: localFilePath, isDirectory: false)
       DispatchQueue.main.async { [self] in
         guard eventChannelName.isEmpty || streamHandlers[eventChannelName] != nil else {
           result(FlutterError(code: "E_CANCEL", message: "Download cancelled", details: nil))
@@ -248,7 +249,6 @@ public class IcloudStoragePlugin: NSObject, FlutterPlugin {
           self.finishDownload(download, eventChannelName: eventChannelName)
         }
 
-        let localFileURL = URL(fileURLWithPath: localFilePath)
         download.observe { [weak self] download in
           self?.onDownloadQueryNotification(download: download, localFileURL: localFileURL, eventChannelName: eventChannelName)
         }

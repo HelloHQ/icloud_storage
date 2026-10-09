@@ -6,7 +6,7 @@ private final class MetadataItem: NSMetadataItem {
   private let url: URL?
 
   init(path: String?) {
-    url = path.map { URL(fileURLWithPath: $0) }
+    url = path.map { URL(fileURLWithPath: $0, isDirectory: false) }
     super.init()
   }
 
