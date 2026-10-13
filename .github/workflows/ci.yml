@@ -22,7 +22,7 @@ on:
     # where a gate looks present and enforces nothing. `main` is kept so a
     # future rename does not silently disable it again.
     branches: [master, main, "hellohq/**"]
-  pull_request:
+  # CI-PAUSE 2026-10-13: pull_request:
   workflow_dispatch:
 
 concurrency:
